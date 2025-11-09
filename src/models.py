@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .db import Base
 
@@ -17,5 +17,9 @@ class Participant(Base):
     __tablename__ = "participants"
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(200), index=True, nullable=False)
-    activity_id = Column(Integer, ForeignKey("activities.id"))
+    activity_id = Column(Integer, ForeignKey("activities.id", ondelete="CASCADE"))
     activity = relationship("Activity", back_populates="participants")
+
+    __table_args__ = (
+        UniqueConstraint("email", "activity_id", name="uq_participant_email_activity"),
+    )
