@@ -8,8 +8,11 @@ for extracurricular activities at Mergington High School.
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-import os
 from pathlib import Path
+import os
+
+from .db import engine, Base, SessionLocal
+from .models import Activity, Participant
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -19,8 +22,8 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
+# Seed data (same as previous in-memory dataset)
+SEED_ACTIVITIES = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -78,6 +81,33 @@ activities = {
 }
 
 
+@app.on_event("startup")
+def startup_event():
+    # Ensure database tables exist
+    Base.metadata.create_all(bind=engine)
+
+    # Seed DB if empty
+    db = SessionLocal()
+    try:
+        existing = db.query(Activity).count()
+        if existing == 0:
+            for name, payload in SEED_ACTIVITIES.items():
+                a = Activity(
+                    name=name,
+                    description=payload.get("description"),
+                    schedule=payload.get("schedule"),
+                    max_participants=payload.get("max_participants", 0)
+                )
+                db.add(a)
+                db.flush()  # ensure a.id is available
+                for email in payload.get("participants", []):
+                    p = Participant(email=email, activity_id=a.id)
+                    db.add(p)
+            db.commit()
+    finally:
+        db.close()
+
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
@@ -85,48 +115,73 @@ def root():
 
 @app.get("/activities")
 def get_activities():
-    return activities
+    db = SessionLocal()
+    try:
+        activities = db.query(Activity).all()
+        result = {}
+        for a in activities:
+            result[a.name] = {
+                "description": a.description,
+                "schedule": a.schedule,
+                "max_participants": a.max_participants,
+                "participants": [p.email for p in a.participants]
+            }
+        return result
+    finally:
+        db.close()
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    db = SessionLocal()
+    try:
+        activity = db.query(Activity).filter(Activity.name == activity_name).first()
+        if not activity:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        # Validate student is not already signed up
+        if any(p.email == email for p in activity.participants):
+            raise HTTPException(
+                status_code=400,
+                detail="Student is already signed up"
+            )
 
-    # Validate student is not already signed up
-    if email in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is already signed up"
-        )
+        # Validate capacity
+        if activity.max_participants and len(activity.participants) >= activity.max_participants:
+            raise HTTPException(status_code=400, detail="Activity is at capacity")
 
-    # Add student
-    activity["participants"].append(email)
-    return {"message": f"Signed up {email} for {activity_name}"}
+        participant = Participant(email=email, activity_id=activity.id)
+        db.add(participant)
+        db.commit()
+        return {"message": f"Signed up {email} for {activity_name}"}
+    finally:
+        db.close()
 
 
 @app.delete("/activities/{activity_name}/unregister")
 def unregister_from_activity(activity_name: str, email: str):
     """Unregister a student from an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    db = SessionLocal()
+    try:
+        activity = db.query(Activity).filter(Activity.name == activity_name).first()
+        if not activity:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        participant = None
+        for p in activity.participants:
+            if p.email == email:
+                participant = p
+                break
 
-    # Validate student is signed up
-    if email not in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is not signed up for this activity"
-        )
+        if not participant:
+            raise HTTPException(
+                status_code=400,
+                detail="Student is not signed up for this activity"
+            )
 
-    # Remove student
-    activity["participants"].remove(email)
-    return {"message": f"Unregistered {email} from {activity_name}"}
+        db.delete(participant)
+        db.commit()
+        return {"message": f"Unregistered {email} from {activity_name}"}
+    finally:
+        db.close()
